@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     app_name: str = "url-shortener"
     database_url: str = "postgresql+psycopg://shortener:shortener@localhost:5432/shortener"
     redis_url: str = "redis://localhost:6379/0"
+    base_url: str = "http://localhost:8000"
 
     # No default on purpose: the app refuses to start without a real secret.
     secret_key: str

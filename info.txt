@@ -1,0 +1,80 @@
+Step 1: Database layer
+
+The 30-second pitch. "I used PostgreSQL with SQLAlchemy 2.0 as the ORM and Alembic for schema migrations. There are two tables: users, and links with a foreign key to its owner. Uniqueness of short codes and emails is enforced by the database itself with unique indexes, not only in application code."
+
+How it works
+
+Engine. create_engine sets up a pool of database connections. By default SQLAlchemy keeps 5 connections plus up to 10 extra, so about 15 per process, and each server worker process gets its own pool. pool_pre_ping=True tests a connection before using it, so a connection that Postgres dropped gets replaced and doesn't cause a failed request.
+Session. A session is one conversation with the database, and SessionLocal is the factory that makes them. expire_on_commit=False keeps objects readable after a commit, so returning a freshly created user doesn't trigger extra queries.
+get_db. A FastAPI dependency that opens one session per request and closes it afterwards. Each request is isolated, and connections always return to the pool, even when an error happens.
+Models. Each class is a table, and each object is a row. User has id, a unique indexed email, password_hash, and created_at. Link has id, a unique indexed code, target_url, owner_id, and created_at.
+Constraints and indexes.
+The unique index on links.code makes lookups fast, since every redirect searches by code, and it prevents two links from ever sharing a code.
+The index on owner_id speeds up "list my links".
+The foreign key with ON DELETE CASCADE means deleting a user deletes their links, so no orphaned rows are left behind.
+server_default=func.now(). The database fills in the timestamp, so it's correct however a row is inserted. timezone=True stores timezone-aware times.
+Alembic. Every schema change is a small versioned migration file. --autogenerate compares your Python models with the live database and writes the difference. upgrade head applies it, and a table called alembic_version records which migration the database is on. I edited migrations/env.py so Alembic uses the same database URL and models as the app.
+
+Design decisions you can defend
+
+Migrations instead of create_all(). create_all only creates missing tables and can't change existing ones. Migrations are repeatable, reviewable in git, and reversible, and the same files run against the production database at deploy time.
+A separate code column instead of using the ID as the code. The primary key stays a plain integer, and the public short code is its own unique column. That keeps the collision handling in step 3 simple, and it lets us change how codes are generated without touching the primary key.
+Synchronous SQLAlchemy. I chose it for simplicity. FastAPI runs normal def endpoints in a thread pool (40 threads by default), which is fine at this scale. Later, Redis caching keeps most redirects from reaching the database at all. If load tests showed the database driver was the bottleneck, I'd measure it first and only then consider async.
+
+Likely questions
+
+Why an index on code? Without one, Postgres scans the whole table for every redirect. With a B-tree index, lookup is roughly logarithmic in the number of rows. The cost is slightly slower inserts and some extra storage.
+What if two users get the same random code at the same moment? The unique constraint makes one insert fail with an IntegrityError, and the code catches it and retries with a new code. That's safe even under concurrency, because the database is the single source of truth. An "if it doesn't exist, insert" check in Python would have a race condition.
+What does an ORM give you, and what does it cost? It gives you safer queries (no string-built SQL, so no SQL injection by default), less repetition, and Python objects to work with. The costs are some hidden queries (like the N+1 problem) and less control, which is why you inspect the SQL for hot paths.
+What happens with many server workers? Each worker has its own connection pool, so total connections are workers times pool size, and Postgres has a connection limit. In production you'd size the pools carefully or put a pooler like PgBouncer in front.
+Step 2: Authentication
+
+The 30-second pitch. "Users register with an email and password. I store only an Argon2 hash of the password. On login the server verifies the hash and returns a signed JWT with the user's id and an expiry time. Protected routes read the token from the Authorization header, verify its signature and expiry, and load the user. It's stateless, so the server keeps no session storage."
+
+The flows
+
+Register.
+Pydantic validates the request: a valid email and a password of 8 to 128 characters (the 422 errors come from here).
+The email is lowercased so Ayan@x.com and ayan@x.com are the same account.
+If the email exists, return 409 (conflict).
+Otherwise hash the password, insert the user, and return 201.
+If two requests register the same email at the same instant, the unique index rejects one, and the code catches the IntegrityError and returns 409.
+Login.
+The endpoint accepts a form with username and password, which is the OAuth2 standard. Following it makes the Authorize button in /docs work. Our username is the email.
+It looks up the user and verifies the password.
+On failure it returns the same 401 message ("Incorrect email or password") whether the email or the password was wrong.
+On success it creates a JWT and returns it.
+Protected route. A route declares user: CurrentUser. FastAPI runs get_current_user first: it reads the Bearer token, decodes and verifies it, loads the user, and returns 401 if anything is wrong. This is dependency injection. Any route gets auth by adding one parameter, and the auth logic lives in one place.
+
+Password hashing
+
+Passwords are never stored or logged in plain text. If the database leaks, attackers get hashes, not passwords.
+I use Argon2id, a deliberately slow, memory-hungry hash that won the Password Hashing Competition. Fast hashes like MD5 or SHA-256 can be brute-forced at billions of guesses per second on GPUs. Argon2 needs memory per guess, which makes that expensive. You can see the settings inside a stored hash: $argon2id$v=19$m=65536,t=3,p=4 means 64 MB of memory, 3 iterations, and 4 lanes of parallelism.
+Every hash includes its own random salt, so two users with the same password have different hashes, and precomputed tables (rainbow tables) don't work.
+max_length=128 on passwords matters because hashing a huge string costs CPU, and an attacker could otherwise use that to slow the server down.
+
+JWTs
+
+A JWT is three base64 parts: header, payload, and signature. Our payload is sub (the user id), iat (issued at), and exp (expiry, 60 minutes). The signature is an HMAC-SHA256 over the header and payload using SECRET_KEY.
+Anyone can read the payload, since it's encoded, not encrypted, so it holds no secrets. Nobody can change it without invalidating the signature, because they don't have the key.
+Decoding pins algorithms=[HS256]. That blocks the classic attacks where a token claims to use a different algorithm, or "none".
+SECRET_KEY has no default value, so the app refuses to start without one, and it lives in .env, which git ignores. A hard-coded secret is a common real-world breach.
+
+Design decisions you can defend
+
+JWT instead of server-side sessions. No session storage lookup on each request, and any server instance can verify a token, which suits horizontal scaling. The trade-off is that you can't easily revoke a token before it expires.
+Same error for unknown email and wrong password, plus DUMMY_HASH. If the email doesn't exist, the code still runs a hash verification against a dummy hash. Otherwise, the "user not found" case would return noticeably faster, and an attacker could time requests to discover which emails are registered. Registration still tells you if an email is taken, which is a common accepted trade-off, and I'd mention that honestly.
+Status codes have meaning. 201 created, 409 conflict, 422 invalid input, and 401 not authenticated.
+
+Likely questions
+
+JWT vs sessions? JWTs are stateless and scale easily, but revoking one early is hard. Sessions are stored server-side (often in Redis), so revoking is instant, but every request needs a lookup. A common compromise is short-lived access tokens plus refresh tokens.
+How would you log a user out or revoke a token? With short expiry, the token dies on its own. For immediate revocation, keep a denylist of token ids in Redis until they expire, which fits our stack. Or rotate refresh tokens.
+Where would the frontend store the token? In localStorage it's exposed to XSS attacks. In an httpOnly cookie it's safe from XSS but needs CSRF protection. There's no perfect answer, and it depends on the threat model.
+What if SECRET_KEY leaks? Anyone can forge tokens. You rotate the key immediately, which invalidates all existing tokens. That's why it never goes into git.
+HS256 vs RS256? HS256 uses one shared secret, which is fine when a single service both issues and verifies tokens. RS256 signs with a private key and verifies with a public key, which suits many services that only need to verify.
+Argon2 or bcrypt? Both are acceptable. Argon2id is newer and memory-hard, and it's what current guidance recommends. bcrypt is older but still widely used.
+How would you protect the login endpoint from brute force? Rate limiting per IP and per account, which is exactly what we build in Phase 3.
+What's missing for production? Refresh tokens, email verification, password reset, and account lockout or throttling.
+
+When you're ready, step 3 is the core feature: creating short links with random codes, the redirect, and listing and deleting your own links.
