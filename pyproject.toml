@@ -6,7 +6,11 @@ dependencies = [
     "alembic>=1.20.0",
     "fastapi>=0.141.1",
     "psycopg[binary]>=3.3.6",
+    "pwdlib[argon2]>=0.3.1",
     "pydantic-settings>=2.15.0",
+    "pydantic[email]>=2.13.5",
+    "pyjwt>=2.14.0",
+    "python-multipart>=0.0.32",
     "sqlalchemy>=2",
     "uvicorn[standard]>=0.53.0",
 ]
