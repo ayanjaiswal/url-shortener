@@ -1,15 +1,16 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 
 from app.codes import is_valid_code
 from app.deps import DbSession
 from app.models import Link
+from app.rate_limiter import rate_limit_per_ip
 
 router = APIRouter(tags=["redirect"])
 
 
-@router.get("/{code}")
+@router.get("/{code}", dependencies=[Depends(rate_limit_per_ip)])
 def redirect_to_target(code: str, db: DbSession) -> RedirectResponse:
     if not is_valid_code(code):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Link not found")

@@ -1,12 +1,13 @@
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.codes import generate_code
 from app.deps import CurrentUser, DbSession
 from app.models import Link
+from app.rate_limiter import rate_limit_per_user
 from app.schemas import LinkCreate, LinkOut
 
 router = APIRouter(prefix="/links", tags=["links"])
@@ -14,7 +15,7 @@ router = APIRouter(prefix="/links", tags=["links"])
 MAX_CODE_ATTEMPTS = 5
 
 
-@router.post("", response_model=LinkOut, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=LinkOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(rate_limit_per_user)])
 def create_link(payload: LinkCreate, user: CurrentUser, db: DbSession) -> Link:
     owner_id = user.id
     target_url = str(payload.url)
