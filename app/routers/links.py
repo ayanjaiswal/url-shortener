@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from app.cache import invalidate_cached_target
 from app.codes import generate_code
 from app.deps import CurrentUser, DbSession
 from app.models import Link
@@ -60,3 +61,4 @@ def delete_link(code: str, user: CurrentUser, db: DbSession) -> None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Link not found")
     db.delete(link)
     db.commit()
+    invalidate_cached_target(code)
