@@ -1,7 +1,6 @@
 import os
 
-# Point the app at a separate TEST database *before* the app is imported.
-# (Real environment variables take priority over the .env file.)
+
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
     "postgresql+psycopg://shortener:shortener@localhost:5432/shortener_test",
@@ -9,7 +8,11 @@ TEST_DATABASE_URL = os.environ.get(
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 os.environ["SECRET_KEY"] = "test-secret-key-not-for-production"
 
-from collections.abc import Callable, Iterator  # noqa: E402
+
+TEST_REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/1")
+os.environ["REDIS_URL"] = TEST_REDIS_URL
+
+from collections.abc import Callable, Iterator  
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -18,12 +21,12 @@ from sqlalchemy import text  # noqa: E402
 import app.models  # noqa: E402, F401  (registers the tables on Base)
 from app.db import Base, engine  # noqa: E402
 from app.main import app  # noqa: E402
+from app.redis_client import redis_client  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _database() -> Iterator[None]:
     """Create all tables once per test run, and drop them afterwards."""
-    # Safety net: never wipe a real database by accident.
     assert engine.url.database is not None
     assert engine.url.database.endswith("_test"), "refusing to run tests on a non-test database"
     Base.metadata.drop_all(engine)
@@ -39,6 +42,13 @@ def _clean_tables() -> Iterator[None]:
     yield
     with engine.begin() as conn:
         conn.execute(text("TRUNCATE users, links RESTART IDENTITY CASCADE"))
+
+
+@pytest.fixture(autouse=True)
+def _clean_redis() -> Iterator[None]:
+    """Every test starts with empty rate-limit buckets and empty cache entries."""
+    yield
+    redis_client.flushdb()
 
 
 @pytest.fixture
